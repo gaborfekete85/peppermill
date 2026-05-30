@@ -7,7 +7,7 @@ name = "peppermill"
 version = "0.1.0"
 description = "PepperMill — a minimal LLM-agent framework, reimplemented for deep understanding."
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.14"
 license = "MIT"
 authors = [{ name = "Gabor Fekete", email = "gabor.fekete85@gmail.com" }]
 dependencies = []
