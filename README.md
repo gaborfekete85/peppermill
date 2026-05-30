@@ -11,4 +11,5 @@ roadmap: [`docs/superpowers/specs/2026-05-29-peppermill-reimplementation-design.
 ```bash
 # pip install -e ".[dev]"
 uv sync --extra dev
+# OR pip install -e ".[dev]"
 python -m peppermill
