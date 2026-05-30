@@ -9,5 +9,7 @@ roadmap: [`docs/superpowers/specs/2026-05-29-peppermill-reimplementation-design.
 ## Quick start (v0.1)
 
 ```bash
-pip install -e ".[dev]"
+# pip install -e ".[dev]"
+uv sync --extra dev
+# OR pip install -e ".[dev]"
 python -m peppermill
