@@ -71,7 +71,7 @@ class AgentRunner:
         tools_used: list[str] = []
         tool_schemas = spec.tool_schemas or None
 
-        while True:
+        for _iteration in range(spec.max_iterations):
             response = await spec.provider.chat(messages, tools=tool_schemas)
 
             if response.has_tool_calls:
@@ -91,7 +91,11 @@ class AgentRunner:
                         result: Any = f"error: unknown tool '{tc.name}'"
                         log.warning("unknown tool requested: %s", tc.name)
                     else:
-                        result = await tool.execute(**tc.arguments)
+                        try:
+                            result = await tool.execute(**tc.arguments)
+                        except Exception as exc:
+                            log.exception("tool %s raised", tc.name)
+                            result = f"error: {exc}"
                     messages.append(
                         {
                             "role": "tool",
@@ -107,3 +111,11 @@ class AgentRunner:
                 tools_used=tools_used,
                 stop_reason="completed",
             )
+
+        # Loop exhausted without a final text response.
+        return AgentRunResult(
+            final_content=None,
+            messages=messages,
+            tools_used=tools_used,
+            stop_reason="max_iterations",
+        )

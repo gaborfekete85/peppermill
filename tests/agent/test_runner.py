@@ -113,3 +113,68 @@ async def test_run_appends_assistant_tool_calls_then_tool_results_to_messages():
     assert result.messages[2]["role"] == "tool"
     assert result.messages[2]["tool_call_id"] == "c1"
     assert result.messages[2]["content"] == "5"
+
+
+# ---------------------------------------------------------------------------
+# Error paths and max_iterations (Task 4)
+# ---------------------------------------------------------------------------
+
+
+async def test_run_returns_error_string_for_unknown_tool_and_continues():
+    script = [
+        LLMResponse(
+            tool_calls=[ToolCallRequest(id="1", name="missing", arguments={})],
+            finish_reason="tool_calls",
+        ),
+        LLMResponse(content="recovered", finish_reason="stop"),
+    ]
+    runner = AgentRunner()
+    result = await runner.run(_spec(ScriptedProvider(script), tools={}))
+
+    assert result.final_content == "recovered"
+    tool_msg = next(m for m in result.messages if m.get("role") == "tool")
+    assert "unknown tool" in tool_msg["content"]
+    assert "missing" in tool_msg["content"]
+
+
+async def test_run_returns_error_string_when_tool_raises_and_continues():
+    class ExplodingTool:
+        name = "boom"
+        def schema(self):
+            return {"name": "boom", "description": "x", "parameters": {"type": "object", "properties": {}}}
+        async def execute(self, **kwargs):
+            raise RuntimeError("kaboom")
+
+    script = [
+        LLMResponse(
+            tool_calls=[ToolCallRequest(id="1", name="boom", arguments={})],
+            finish_reason="tool_calls",
+        ),
+        LLMResponse(content="ok", finish_reason="stop"),
+    ]
+    runner = AgentRunner()
+    result = await runner.run(_spec(ScriptedProvider(script), tools={"boom": ExplodingTool()}))
+
+    assert result.final_content == "ok"
+    tool_msg = next(m for m in result.messages if m.get("role") == "tool")
+    assert "kaboom" in tool_msg["content"]
+
+
+async def test_run_returns_max_iterations_stop_reason_when_loop_exhausts():
+    # Provider keeps requesting tool calls — never returns final text.
+    forever_script = [
+        LLMResponse(
+            tool_calls=[ToolCallRequest(id=str(i), name="add", arguments={"a": 1, "b": 1})],
+            finish_reason="tool_calls",
+        )
+        for i in range(10)
+    ]
+    runner = AgentRunner()
+    result = await runner.run(
+        _spec(ScriptedProvider(forever_script), tools={"add": AddTool()}, max_iterations=3)
+    )
+
+    assert result.stop_reason == "max_iterations"
+    assert result.final_content is None
+    # tools_used should have exactly max_iterations entries (one per round)
+    assert len(result.tools_used) == 3
