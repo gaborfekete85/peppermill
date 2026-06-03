@@ -1,109 +1,100 @@
-"""AgentLoop — v0.1's minimal LLM + tool-execution loop.
+"""AgentLoop — per-turn orchestration via a small TurnState FSM.
 
-For each inbound message:
-  1. Seed the messages list with the user's content.
-  2. Call provider.chat().
-  3. If the response has tool calls: execute each, append results, loop.
-  4. If the response has text: publish as outbound, stop.
+v0.3 promotes v0.2's linear run_once into a state machine and extracts
+the LLM-conversation engine into AgentRunner (peppermill/agent/runner.py).
 
-No state machine, no sessions, no streaming, no context governance.
-v0.3 promotes this to a proper TurnState FSM and extracts AgentRunner.
+The FSM is intentionally minimal — four states, all linear:
+
+    BUILD → RUN → RESPOND → DONE
+
+Each state handler is ``async def _state_X(self, ctx) -> TurnState`` and
+returns the next state. ``run_once`` drives transitions with ``match/case``.
+
+Future versions will add states without rewriting this one:
+- RESTORE + SAVE  (v0.4 — sessions / persistence)
+- COMMAND         (later — /slash command dispatch)
+- COMPACT         (v0.8 — context governance / auto-compact)
+
+When that happens we may switch from "handler returns next state" to a
+transition-table dict (matching nanobot's shape), but for four linear
+states direct returns are clearer.
 """
 from __future__ import annotations
 
 import logging
-from typing import Any, Protocol
+from dataclasses import dataclass, field
+from enum import Enum, auto
+from typing import Any
 
+from peppermill.agent.runner import AgentRunner, AgentRunResult, AgentRunSpec, _ToolLike
 from peppermill.bus.events import InboundMessage, OutboundMessage
 from peppermill.bus.queue import MessageBus
+from peppermill.providers.base import LLMProvider
 
 log = logging.getLogger(__name__)
 
 
-class _ProviderLike(Protocol):
-    """The minimal provider contract v0.1 needs.
+class TurnState(Enum):
+    """Sentinel values for each phase of processing one inbound message."""
 
-    Avoids importing FakeProvider at the type level so v0.2 can plug in
-    a real provider without changing this file.
+    BUILD = auto()
+    RUN = auto()
+    RESPOND = auto()
+    DONE = auto()
+
+
+@dataclass
+class _TurnContext:
+    """Mutable scratch space carried between state handlers.
+
+    Each handler reads/writes only the fields it owns; this keeps
+    handler signatures uniform ``(self, ctx) -> TurnState`` without
+    relying on globals or method-instance state.
     """
 
-    async def chat(
-        self,
-        messages: list[dict[str, Any]],
-        tools: list[dict[str, Any]] | None = None,
-    ) -> Any: ...
-
-
-class _ToolLike(Protocol):
-    """The minimal tool contract v0.1 needs."""
-
-    name: str
-
-    def schema(self) -> dict[str, Any]: ...
-    async def execute(self, **kwargs: Any) -> Any: ...
+    inbound: InboundMessage
+    messages: list[dict[str, Any]] = field(default_factory=list)
+    tool_schemas: list[dict[str, Any]] = field(default_factory=list)
+    result: AgentRunResult | None = None
 
 
 class AgentLoop:
+    """Per-inbound-message orchestrator.
+
+    Owns: bus, provider, tools registry, max_iterations, the runner.
+    Does NOT own: LLM-conversation logic (that's AgentRunner).
+    """
+
     def __init__(
         self,
         bus: MessageBus,
-        provider: _ProviderLike,
+        provider: LLMProvider,
         tools: dict[str, _ToolLike],
+        max_iterations: int = 20,
     ) -> None:
         self._bus = bus
         self._provider = provider
         self._tools = tools
+        self._max_iterations = max_iterations
+        # AgentRunner is stateless across turns; one instance is fine.
+        self._runner = AgentRunner()
 
     async def run_once(self, msg: InboundMessage) -> None:
-        """Process one inbound message: call provider, execute tools, publish reply."""
-        messages: list[dict[str, Any]] = [{"role": "user", "content": msg.content}]
-        tool_schemas: list[dict[str, Any]] = [t.schema() for t in self._tools.values()]
-
-        while True:
-            response = await self._provider.chat(messages, tools=tool_schemas)
-
-            if response.has_tool_calls:
-                messages.append(
-                    {
-                        "role": "assistant",
-                        "tool_calls": [
-                            {
-                                "id": tc.id,
-                                "name": tc.name,
-                                "arguments": tc.arguments,
-                            }
-                            for tc in response.tool_calls
-                        ],
-                    }
-                )
-                for tc in response.tool_calls:
-                    tool = self._tools.get(tc.name)
-                    if tool is None:
-                        result: Any = f"error: unknown tool '{tc.name}'"
-                        log.warning("unknown tool requested: %s", tc.name)
-                    else:
-                        try:
-                            result = await tool.execute(**tc.arguments)
-                        except Exception as exc:
-                            log.exception("tool %s raised", tc.name)
-                            result = f"error: {exc}"
-                    messages.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": tc.id,
-                            "content": str(result),
-                        }
-                    )
-                continue  # loop back to call the provider again
-
-            await self._bus.publish_outbound(
-                OutboundMessage(
-                    channel=msg.channel,
-                    chat_id=msg.chat_id,
-                    content=response.content or "",
-                )
-            )
-            return
+        """Drive the FSM through one inbound message."""
+        ctx = _TurnContext(inbound=msg)
+        state = TurnState.BUILD
+        while state is not TurnState.DONE:
+            match state:
+                case TurnState.BUILD:
+                    state = await self._state_build(ctx)
+                case TurnState.RUN:
+                    state = await self._state_run(ctx)
+                case TurnState.RESPOND:
+                    state = await self._state_respond(ctx)
+                case TurnState.DONE:
+                    break  # while-condition exits next iteration anyway
+                case _:
+                    raise RuntimeError(f"unknown state: {state}")
 
     async def run_forever(self) -> None:
         """Drain inbound forever, processing each message sequentially."""
@@ -113,3 +104,37 @@ class AgentLoop:
                 await self.run_once(msg)
             except Exception:
                 log.exception("error processing message session=%s", msg.session_key)
+
+    # ------------------------------------------------------------------
+    # State handlers
+    # ------------------------------------------------------------------
+
+    async def _state_build(self, ctx: _TurnContext) -> TurnState:
+        """Seed the initial messages list + tool schemas from the inbound."""
+        ctx.messages = [{"role": "user", "content": ctx.inbound.content}]
+        ctx.tool_schemas = [t.schema() for t in self._tools.values()]
+        return TurnState.RUN
+
+    async def _state_run(self, ctx: _TurnContext) -> TurnState:
+        """Delegate the LLM turn to AgentRunner; store the result on ctx."""
+        spec = AgentRunSpec(
+            initial_messages=ctx.messages,
+            tools=self._tools,
+            tool_schemas=ctx.tool_schemas,
+            provider=self._provider,
+            max_iterations=self._max_iterations,
+        )
+        ctx.result = await self._runner.run(spec)
+        return TurnState.RESPOND
+
+    async def _state_respond(self, ctx: _TurnContext) -> TurnState:
+        """Publish an OutboundMessage built from the runner result."""
+        final_content = ctx.result.final_content if ctx.result is not None else None
+        await self._bus.publish_outbound(
+            OutboundMessage(
+                channel=ctx.inbound.channel,
+                chat_id=ctx.inbound.chat_id,
+                content=final_content or "",
+            )
+        )
+        return TurnState.DONE
