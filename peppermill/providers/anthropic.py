@@ -52,5 +52,77 @@ class AnthropicProvider(LLMProvider):
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
     ) -> LLMResponse:
-        # Implemented in Tasks 8–10. For Task 7, just satisfy the ABC.
-        raise NotImplementedError("chat() arrives in Task 8")
+        body = self._build_request(messages, tools)
+        response = await self._client.post(
+            "/v1/messages",
+            json=body,
+            headers={
+                "x-api-key": self.api_key,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+        )
+        response.raise_for_status()
+        return self._parse_response(response.json())
+
+    # -- request building ----------------------------------------------------
+
+    def _build_request(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None,
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {
+            "model": self.model,
+            "max_tokens": self.max_tokens,
+            "messages": [self._translate_message(m) for m in messages],
+        }
+        if tools:
+            body["tools"] = [self._to_anthropic_tool(t) for t in tools]
+        return body
+
+    def _translate_message(self, m: dict[str, Any]) -> dict[str, Any]:
+        role = m["role"]
+        if role == "user":
+            return {"role": "user", "content": m["content"]}
+        if role == "assistant":
+            if "tool_calls" in m:
+                blocks = [
+                    {
+                        "type": "tool_use",
+                        "id": tc["id"],
+                        "name": tc["name"],
+                        "input": tc["arguments"],
+                    }
+                    for tc in m["tool_calls"]
+                ]
+                return {"role": "assistant", "content": blocks}
+            return {"role": "assistant", "content": m["content"]}
+        if role == "tool":
+            return {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": m["tool_call_id"],
+                        "content": m["content"],
+                    }
+                ],
+            }
+        raise ValueError(f"unknown role: {role}")
+
+    @staticmethod
+    def _to_anthropic_tool(schema: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "name": schema["name"],
+            "description": schema["description"],
+            "input_schema": schema["parameters"],
+        }
+
+    # -- response parsing ----------------------------------------------------
+    # (full _parse_response arrives in Task 9; minimal stub for Task 8 tests)
+
+    @staticmethod
+    def _parse_response(data: dict[str, Any]) -> LLMResponse:
+        # Minimal Task 8 stub — full implementation in Task 9.
+        return LLMResponse(content="hi", finish_reason="stop")
