@@ -313,3 +313,45 @@ async def test_chat_maps_stop_reasons(raw_stop_reason: str, expected_finish: str
     assert r.finish_reason == expected_finish
 
 
+# ---------------------------------------------------------------------------
+# Error-handling tests
+# ---------------------------------------------------------------------------
+
+
+async def test_chat_raises_http_status_error_on_401():
+    provider = AnthropicProvider(
+        api_key="bad-key",
+        client=_client_returning({"error": "unauthorized"}, status=401),
+    )
+    with pytest.raises(httpx.HTTPStatusError) as exc_info:
+        await provider.chat(messages=[{"role": "user", "content": "hi"}])
+    assert exc_info.value.response.status_code == 401
+
+
+async def test_chat_raises_http_status_error_on_500():
+    provider = AnthropicProvider(
+        api_key="k",
+        client=_client_returning({"error": "server"}, status=500),
+    )
+    with pytest.raises(httpx.HTTPStatusError) as exc_info:
+        await provider.chat(messages=[])
+    assert exc_info.value.response.status_code == 500
+
+
+async def test_chat_does_not_swallow_connect_errors():
+    """A transport that raises ConnectError should bubble up unchanged."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("simulated network failure")
+
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://api.anthropic.com",
+    )
+    provider = AnthropicProvider(api_key="k", client=client)
+
+    with pytest.raises(httpx.ConnectError, match="simulated"):
+        await provider.chat(messages=[])
+
+
+
