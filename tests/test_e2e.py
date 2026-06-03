@@ -1,5 +1,5 @@
-"""End-to-end test: inbound message through the bus, through the loop,
-through tool execution, out as an OutboundMessage."""
+"""End-to-end test: inbound through bus → loop → ScriptedProvider →
+tool → ScriptedProvider → out as OutboundMessage. Hermetic — no network."""
 import asyncio
 
 import pytest
@@ -8,7 +8,8 @@ from peppermill.agent.loop import AgentLoop
 from peppermill.agent.tools.add import AddTool
 from peppermill.bus.events import InboundMessage
 from peppermill.bus.queue import MessageBus
-from peppermill.providers.fake import FakeProvider, LLMResponse, ToolCallRequest
+from peppermill.providers.base import LLMResponse, ToolCallRequest
+from tests._helpers.scripted_provider import ScriptedProvider
 
 
 async def test_full_pipeline_inbound_to_outbound():
@@ -22,11 +23,10 @@ async def test_full_pipeline_inbound_to_outbound():
     ]
     agent = AgentLoop(
         bus=bus,
-        provider=FakeProvider(script),
+        provider=ScriptedProvider(script),
         tools={"add": AddTool()},
     )
 
-    # Drive the loop in the background; cancel it after we get the reply.
     runner = asyncio.create_task(agent.run_forever())
     try:
         await bus.publish_inbound(
