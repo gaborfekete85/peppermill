@@ -5,7 +5,8 @@ provider.chat() and tool execution, return an AgentRunResult. No bus,
 no channels, no FSM. Tested in isolation with ScriptedProvider.
 """
 from peppermill.agent.runner import AgentRunner, AgentRunSpec
-from peppermill.providers.base import LLMResponse
+from peppermill.agent.tools.add import AddTool
+from peppermill.providers.base import LLMResponse, ToolCallRequest
 from tests._helpers.scripted_provider import ScriptedProvider
 
 
@@ -51,3 +52,64 @@ async def test_run_returns_none_content_when_provider_returns_no_text():
     result = await runner.run(_spec(provider))
     assert result.final_content is None
     assert result.stop_reason == "completed"
+
+
+# ---------------------------------------------------------------------------
+# Tool execution (Task 3)
+# ---------------------------------------------------------------------------
+
+
+async def test_run_executes_tool_call_and_feeds_result_back():
+    script = [
+        LLMResponse(
+            tool_calls=[ToolCallRequest(id="1", name="add", arguments={"a": 2, "b": 3})],
+            finish_reason="tool_calls",
+        ),
+        LLMResponse(content="The answer is 5.", finish_reason="stop"),
+    ]
+    runner = AgentRunner()
+    result = await runner.run(_spec(ScriptedProvider(script), tools={"add": AddTool()}))
+
+    assert result.final_content == "The answer is 5."
+    assert result.tools_used == ["add"]
+    assert result.stop_reason == "completed"
+
+
+async def test_run_handles_multiple_tool_calls_in_one_response():
+    script = [
+        LLMResponse(
+            tool_calls=[
+                ToolCallRequest(id="1", name="add", arguments={"a": 1, "b": 1}),
+                ToolCallRequest(id="2", name="add", arguments={"a": 5, "b": 5}),
+            ],
+            finish_reason="tool_calls",
+        ),
+        LLMResponse(content="done", finish_reason="stop"),
+    ]
+    runner = AgentRunner()
+    result = await runner.run(_spec(ScriptedProvider(script), tools={"add": AddTool()}))
+
+    assert result.tools_used == ["add", "add"]
+    assert result.final_content == "done"
+
+
+async def test_run_appends_assistant_tool_calls_then_tool_results_to_messages():
+    """The messages list should mirror the on-the-wire shape after execution."""
+    script = [
+        LLMResponse(
+            tool_calls=[ToolCallRequest(id="c1", name="add", arguments={"a": 2, "b": 3})],
+            finish_reason="tool_calls",
+        ),
+        LLMResponse(content="5", finish_reason="stop"),
+    ]
+    runner = AgentRunner()
+    result = await runner.run(_spec(ScriptedProvider(script), tools={"add": AddTool()}))
+
+    # messages: [user, assistant(tool_calls), tool(result)]
+    assert len(result.messages) == 3
+    assert result.messages[0]["role"] == "user"
+    assert result.messages[1]["role"] == "assistant"
+    assert result.messages[1]["tool_calls"][0]["name"] == "add"
+    assert result.messages[2]["role"] == "tool"
+    assert result.messages[2]["tool_call_id"] == "c1"
+    assert result.messages[2]["content"] == "5"

@@ -68,13 +68,42 @@ class AgentRunner:
 
     async def run(self, spec: AgentRunSpec) -> AgentRunResult:
         messages: list[dict[str, Any]] = list(spec.initial_messages)
+        tools_used: list[str] = []
         tool_schemas = spec.tool_schemas or None
 
-        # Text-only path for Task 2. Tool execution arrives in Task 3.
-        response = await spec.provider.chat(messages, tools=tool_schemas)
-        return AgentRunResult(
-            final_content=response.content,
-            messages=messages,
-            tools_used=[],
-            stop_reason="completed",
-        )
+        while True:
+            response = await spec.provider.chat(messages, tools=tool_schemas)
+
+            if response.has_tool_calls:
+                messages.append(
+                    {
+                        "role": "assistant",
+                        "tool_calls": [
+                            {"id": tc.id, "name": tc.name, "arguments": tc.arguments}
+                            for tc in response.tool_calls
+                        ],
+                    }
+                )
+                for tc in response.tool_calls:
+                    tools_used.append(tc.name)
+                    tool = spec.tools.get(tc.name)
+                    if tool is None:
+                        result: Any = f"error: unknown tool '{tc.name}'"
+                        log.warning("unknown tool requested: %s", tc.name)
+                    else:
+                        result = await tool.execute(**tc.arguments)
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tc.id,
+                            "content": str(result),
+                        }
+                    )
+                continue  # back to the provider
+
+            return AgentRunResult(
+                final_content=response.content,
+                messages=messages,
+                tools_used=tools_used,
+                stop_reason="completed",
+            )
