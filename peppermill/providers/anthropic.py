@@ -10,7 +10,7 @@ from typing import Any
 
 import httpx
 
-from peppermill.providers.base import LLMProvider, LLMResponse
+from peppermill.providers.base import LLMProvider, LLMResponse, ToolCallRequest
 
 _STOP_REASON_MAP = {
     "end_turn": "stop",
@@ -120,9 +120,29 @@ class AnthropicProvider(LLMProvider):
         }
 
     # -- response parsing ----------------------------------------------------
-    # (full _parse_response arrives in Task 9; minimal stub for Task 8 tests)
 
     @staticmethod
     def _parse_response(data: dict[str, Any]) -> LLMResponse:
-        # Minimal Task 8 stub — full implementation in Task 9.
-        return LLMResponse(content="hi", finish_reason="stop")
+        text_parts: list[str] = []
+        tool_calls: list[ToolCallRequest] = []
+        for block in data.get("content", []):
+            btype = block.get("type")
+            if btype == "text":
+                text_parts.append(block.get("text", ""))
+            elif btype == "tool_use":
+                tool_calls.append(
+                    ToolCallRequest(
+                        id=block["id"],
+                        name=block["name"],
+                        arguments=block.get("input", {}),
+                    )
+                )
+        content = "".join(text_parts) if text_parts else None
+        stop_reason_raw = data.get("stop_reason", "stop")
+        finish_reason = _STOP_REASON_MAP.get(stop_reason_raw, stop_reason_raw)
+        return LLMResponse(
+            content=content,
+            tool_calls=tool_calls,
+            finish_reason=finish_reason,
+        )
+

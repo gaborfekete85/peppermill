@@ -6,6 +6,7 @@ import httpx
 import pytest
 
 from peppermill.providers.anthropic import AnthropicProvider
+from peppermill.providers.base import ToolCallRequest
 
 # ---------------------------------------------------------------------------
 # Constructor tests
@@ -190,4 +191,125 @@ async def test_chat_omits_tools_field_when_no_tools():
     body = json.loads(captured["body"])
 
     assert "tools" not in body
+
+
+# ---------------------------------------------------------------------------
+# Response-parsing tests
+# ---------------------------------------------------------------------------
+
+
+def _client_returning(payload: dict[str, Any], status: int = 200) -> httpx.AsyncClient:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, json=payload)
+    return httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://api.anthropic.com",
+    )
+
+
+async def test_chat_parses_text_only_response():
+    payload = {
+        "id": "m", "type": "message", "role": "assistant",
+        "content": [{"type": "text", "text": "hello"}],
+        "stop_reason": "end_turn",
+    }
+    provider = AnthropicProvider(api_key="k", client=_client_returning(payload))
+
+    r = await provider.chat(messages=[{"role": "user", "content": "hi"}])
+
+    assert r.content == "hello"
+    assert r.tool_calls == []
+    assert r.finish_reason == "stop"
+
+
+async def test_chat_concatenates_multiple_text_blocks():
+    payload = {
+        "id": "m", "type": "message", "role": "assistant",
+        "content": [
+            {"type": "text", "text": "hello "},
+            {"type": "text", "text": "world"},
+        ],
+        "stop_reason": "end_turn",
+    }
+    provider = AnthropicProvider(api_key="k", client=_client_returning(payload))
+
+    r = await provider.chat(messages=[])
+
+    assert r.content == "hello world"
+
+
+async def test_chat_parses_tool_use_blocks():
+    payload = {
+        "id": "m", "type": "message", "role": "assistant",
+        "content": [
+            {"type": "tool_use", "id": "tu_1", "name": "add", "input": {"a": 2, "b": 3}}
+        ],
+        "stop_reason": "tool_use",
+    }
+    provider = AnthropicProvider(api_key="k", client=_client_returning(payload))
+
+    r = await provider.chat(messages=[])
+
+    assert r.content is None
+    assert len(r.tool_calls) == 1
+    assert r.tool_calls[0] == ToolCallRequest(
+        id="tu_1", name="add", arguments={"a": 2, "b": 3}
+    )
+    assert r.finish_reason == "tool_calls"
+
+
+async def test_chat_parses_mixed_text_and_tool_use():
+    payload = {
+        "id": "m", "type": "message", "role": "assistant",
+        "content": [
+            {"type": "text", "text": "Let me calculate."},
+            {"type": "tool_use", "id": "tu_1", "name": "add", "input": {"a": 1, "b": 1}},
+        ],
+        "stop_reason": "tool_use",
+    }
+    provider = AnthropicProvider(api_key="k", client=_client_returning(payload))
+
+    r = await provider.chat(messages=[])
+
+    assert r.content == "Let me calculate."
+    assert r.has_tool_calls
+    assert r.finish_reason == "tool_calls"
+
+
+async def test_chat_returns_none_content_when_no_text_blocks():
+    payload = {
+        "id": "m", "type": "message", "role": "assistant",
+        "content": [
+            {"type": "tool_use", "id": "tu_1", "name": "add", "input": {}}
+        ],
+        "stop_reason": "tool_use",
+    }
+    provider = AnthropicProvider(api_key="k", client=_client_returning(payload))
+
+    r = await provider.chat(messages=[])
+
+    assert r.content is None
+
+
+@pytest.mark.parametrize(
+    "raw_stop_reason,expected_finish",
+    [
+        ("end_turn", "stop"),
+        ("tool_use", "tool_calls"),
+        ("max_tokens", "length"),
+        ("stop_sequence", "stop_sequence"),  # unknown → passes through
+    ],
+)
+async def test_chat_maps_stop_reasons(raw_stop_reason: str, expected_finish: str):
+    payload = {
+        "id": "m", "type": "message", "role": "assistant",
+        "content": [{"type": "text", "text": "x"}],
+        "stop_reason": raw_stop_reason,
+    }
+    provider = AnthropicProvider(api_key="k", client=_client_returning(payload))
+
+    r = await provider.chat(messages=[])
+
+    assert r.finish_reason == expected_finish
+
 
