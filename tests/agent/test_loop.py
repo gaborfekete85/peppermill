@@ -5,7 +5,6 @@ what the loop does: drive the FSM, build the run spec, publish the
 outbound. Tool execution coverage lives in tests/agent/test_runner.py.
 """
 import asyncio
-from datetime import datetime, timezone
 
 import pytest
 

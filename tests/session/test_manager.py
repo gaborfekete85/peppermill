@@ -1,5 +1,4 @@
 """Tests for SessionManager."""
-import json
 import tempfile
 from pathlib import Path
 
