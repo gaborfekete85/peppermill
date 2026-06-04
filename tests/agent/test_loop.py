@@ -42,12 +42,12 @@ def _loop_with_runner(bus, runner, tools=None, session_manager=None):
 
 
 def test_turnstate_has_v04_states():
-    """Pedagogical guard: the FSM includes RESTORE in v0.4.
+    """Pedagogical guard: the FSM includes RESTORE and SAVE in v0.4.
 
-    Additional states (SAVE, COMMAND, COMPACT) arrive in later
+    Additional states (COMMAND, COMPACT) arrive in later
     versions; this test fails loudly if someone adds them prematurely.
     """
-    assert {s.name for s in TurnState} == {"RESTORE", "BUILD", "RUN", "RESPOND", "DONE"}
+    assert {s.name for s in TurnState} == {"RESTORE", "BUILD", "RUN", "SAVE", "RESPOND", "DONE"}
 
 
 # ---------------------------------------------------------------------------

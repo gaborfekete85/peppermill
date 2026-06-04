@@ -3,15 +3,14 @@
 v0.3 promotes v0.2's linear run_once into a state machine and extracts
 the LLM-conversation engine into AgentRunner (peppermill/agent/runner.py).
 
-v0.4 adds RESTORE to load session history:
+v0.4 adds RESTORE to load session history, and SAVE to persist turns:
 
-    RESTORE → BUILD → RUN → RESPOND → DONE
+    RESTORE → BUILD → RUN → SAVE → RESPOND → DONE
 
 Each state handler is ``async def _state_X(self, ctx) -> TurnState`` and
 returns the next state. ``run_once`` drives transitions with ``match/case``.
 
 Future versions will add states without rewriting this one:
-- SAVE            (v0.4 — sessions / persistence)
 - COMMAND         (later — /slash command dispatch)
 - COMPACT         (v0.8 — context governance / auto-compact)
 
@@ -23,6 +22,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from enum import Enum, auto
 from typing import Any
 
@@ -30,7 +30,7 @@ from peppermill.agent.runner import AgentRunner, AgentRunResult, AgentRunSpec, _
 from peppermill.bus.events import InboundMessage, OutboundMessage
 from peppermill.bus.queue import MessageBus
 from peppermill.providers.base import LLMProvider
-from peppermill.session import SessionManager
+from peppermill.session import SessionManager, TurnSummary
 
 log = logging.getLogger(__name__)
 
@@ -41,6 +41,7 @@ class TurnState(Enum):
     RESTORE = auto()
     BUILD = auto()
     RUN = auto()
+    SAVE = auto()
     RESPOND = auto()
     DONE = auto()
 
@@ -97,6 +98,8 @@ class AgentLoop:
                     state = await self._state_build(ctx)
                 case TurnState.RUN:
                     state = await self._state_run(ctx)
+                case TurnState.SAVE:
+                    state = await self._state_save(ctx)
                 case TurnState.RESPOND:
                     state = await self._state_respond(ctx)
                 case TurnState.DONE:
@@ -165,6 +168,31 @@ class AgentLoop:
             max_iterations=self._max_iterations,
         )
         ctx.result = await self._runner.run(spec)
+        return TurnState.SAVE
+
+    async def _state_save(self, ctx: _TurnContext) -> TurnState:
+        """Persist the turn to session history.
+
+        Builds a TurnSummary and appends it to history.jsonl.
+        """
+        turn_number = len(ctx.history_records) + 1
+        timestamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+        turn_summary = TurnSummary(
+            turn=turn_number,
+            timestamp=timestamp,
+            user_message=ctx.inbound.content,
+            assistant_response=ctx.result.final_content or "",
+            tools_used=ctx.result.tools_used,
+            stop_reason=ctx.result.stop_reason,
+        )
+
+        try:
+            await self._session_manager.save(ctx.session_key, turn_summary)
+        except OSError as exc:
+            log.error("Failed to save session %s: %s", ctx.session_key, exc)
+            # Continue anyway — don't crash the turn
+
         return TurnState.RESPOND
 
     async def _state_respond(self, ctx: _TurnContext) -> TurnState:
