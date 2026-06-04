@@ -16,6 +16,7 @@ from peppermill.agent.tools.add import AddTool
 from peppermill.bus.queue import MessageBus
 from peppermill.channels.cli import CLIChannel
 from peppermill.providers.anthropic import AnthropicProvider
+from peppermill.session import SessionManager
 
 
 async def amain() -> None:
@@ -33,7 +34,8 @@ async def amain() -> None:
     bus = MessageBus()
     tools = {"add": AddTool()}
     provider = AnthropicProvider()
-    agent = AgentLoop(bus=bus, provider=provider, tools=tools)
+    session_manager = SessionManager()
+    agent = AgentLoop(bus=bus, provider=provider, tools=tools, session_manager=session_manager)
 
     channel = CLIChannel(bus=bus)
     await channel.start()
