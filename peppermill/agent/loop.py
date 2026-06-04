@@ -3,21 +3,21 @@
 v0.3 promotes v0.2's linear run_once into a state machine and extracts
 the LLM-conversation engine into AgentRunner (peppermill/agent/runner.py).
 
-The FSM is intentionally minimal — four states, all linear:
+v0.4 adds RESTORE to load session history:
 
-    BUILD → RUN → RESPOND → DONE
+    RESTORE → BUILD → RUN → RESPOND → DONE
 
 Each state handler is ``async def _state_X(self, ctx) -> TurnState`` and
 returns the next state. ``run_once`` drives transitions with ``match/case``.
 
 Future versions will add states without rewriting this one:
-- RESTORE + SAVE  (v0.4 — sessions / persistence)
+- SAVE            (v0.4 — sessions / persistence)
 - COMMAND         (later — /slash command dispatch)
 - COMPACT         (v0.8 — context governance / auto-compact)
 
 When that happens we may switch from "handler returns next state" to a
-transition-table dict (matching nanobot's shape), but for four linear
-states direct returns are clearer.
+transition-table dict (matching nanobot's shape), but for now direct
+returns are clearer.
 """
 from __future__ import annotations
 
@@ -30,6 +30,7 @@ from peppermill.agent.runner import AgentRunner, AgentRunResult, AgentRunSpec, _
 from peppermill.bus.events import InboundMessage, OutboundMessage
 from peppermill.bus.queue import MessageBus
 from peppermill.providers.base import LLMProvider
+from peppermill.session import SessionManager
 
 log = logging.getLogger(__name__)
 
@@ -37,6 +38,7 @@ log = logging.getLogger(__name__)
 class TurnState(Enum):
     """Sentinel values for each phase of processing one inbound message."""
 
+    RESTORE = auto()
     BUILD = auto()
     RUN = auto()
     RESPOND = auto()
@@ -56,6 +58,8 @@ class _TurnContext:
     messages: list[dict[str, Any]] = field(default_factory=list)
     tool_schemas: list[dict[str, Any]] = field(default_factory=list)
     result: AgentRunResult | None = None
+    session_key: str = ""
+    history_records: list[dict[str, Any]] = field(default_factory=list)
 
 
 class AgentLoop:
@@ -71,6 +75,7 @@ class AgentLoop:
         provider: LLMProvider,
         tools: dict[str, _ToolLike],
         max_iterations: int = 20,
+        session_manager: SessionManager | None = None,
     ) -> None:
         self._bus = bus
         self._provider = provider
@@ -78,13 +83,16 @@ class AgentLoop:
         self._max_iterations = max_iterations
         # AgentRunner is stateless across turns; one instance is fine.
         self._runner = AgentRunner()
+        self._session_manager = session_manager or SessionManager()
 
     async def run_once(self, msg: InboundMessage) -> None:
         """Drive the FSM through one inbound message."""
         ctx = _TurnContext(inbound=msg)
-        state = TurnState.BUILD
+        state = TurnState.RESTORE
         while state is not TurnState.DONE:
             match state:
+                case TurnState.RESTORE:
+                    state = await self._state_restore(ctx)
                 case TurnState.BUILD:
                     state = await self._state_build(ctx)
                 case TurnState.RUN:
@@ -109,9 +117,41 @@ class AgentLoop:
     # State handlers
     # ------------------------------------------------------------------
 
+    async def _state_restore(self, ctx: _TurnContext) -> TurnState:
+        """Load session history from disk into context.
+
+        Sets ctx.session_key, ctx.history_records, and seeds ctx.messages
+        with past conversation context.
+        """
+        ctx.session_key = ctx.inbound.session_key
+        ctx.history_records = await self._session_manager.load(ctx.session_key)
+
+        # Seed messages from history: convert past turns to context
+        ctx.messages = []
+        for record in ctx.history_records:
+            # Add user and assistant messages from past turns for context
+            ctx.messages.append(
+                {
+                    "role": "user",
+                    "content": record["user_message"],
+                }
+            )
+            ctx.messages.append(
+                {
+                    "role": "assistant",
+                    "content": record["assistant_response"],
+                }
+            )
+
+        return TurnState.BUILD
+
     async def _state_build(self, ctx: _TurnContext) -> TurnState:
-        """Seed the initial messages list + tool schemas from the inbound."""
-        ctx.messages = [{"role": "user", "content": ctx.inbound.content}]
+        """Append the current user message + build tool schemas from inbound.
+
+        The messages list is already seeded with history from RESTORE.
+        This appends the current user message and builds tool schemas.
+        """
+        ctx.messages.append({"role": "user", "content": ctx.inbound.content})
         ctx.tool_schemas = [t.schema() for t in self._tools.values()]
         return TurnState.RUN
 

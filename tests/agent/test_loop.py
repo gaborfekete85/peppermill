@@ -14,6 +14,7 @@ from peppermill.agent.tools.add import AddTool
 from peppermill.bus.events import InboundMessage
 from peppermill.bus.queue import MessageBus
 from peppermill.providers.base import LLMResponse
+from tests._helpers.in_memory_session_manager import InMemorySessionManager
 from tests._helpers.scripted_provider import ScriptedProvider
 from tests._helpers.scripted_runner import ScriptedRunner
 
@@ -23,12 +24,13 @@ def bus():
     return MessageBus()
 
 
-def _loop_with_runner(bus, runner, tools=None):
+def _loop_with_runner(bus, runner, tools=None, session_manager=None):
     """Build an AgentLoop and inject a ScriptedRunner so the real runner is bypassed."""
     loop = AgentLoop(
         bus=bus,
         provider=ScriptedProvider([LLMResponse(content="never called")]),
         tools=tools or {},
+        session_manager=session_manager or InMemorySessionManager(),
     )
     loop._runner = runner
     return loop
@@ -39,13 +41,13 @@ def _loop_with_runner(bus, runner, tools=None):
 # ---------------------------------------------------------------------------
 
 
-def test_turnstate_has_only_v03_states():
-    """Pedagogical guard: the FSM is intentionally minimal in v0.3.
+def test_turnstate_has_v04_states():
+    """Pedagogical guard: the FSM includes RESTORE in v0.4.
 
-    Additional states (RESTORE, SAVE, COMMAND, COMPACT) arrive in later
+    Additional states (SAVE, COMMAND, COMPACT) arrive in later
     versions; this test fails loudly if someone adds them prematurely.
     """
-    assert {s.name for s in TurnState} == {"BUILD", "RUN", "RESPOND", "DONE"}
+    assert {s.name for s in TurnState} == {"RESTORE", "BUILD", "RUN", "RESPOND", "DONE"}
 
 
 # ---------------------------------------------------------------------------
@@ -101,6 +103,7 @@ async def test_run_state_forwards_max_iterations_to_spec(bus):
         provider=ScriptedProvider([LLMResponse(content="x")]),
         tools={},
         max_iterations=7,
+        session_manager=InMemorySessionManager(),
     )
     loop._runner = runner
 
